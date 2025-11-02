@@ -28,6 +28,8 @@ app.get('/usuarios/:cedula', async (req, res) => {
 // ✅ Crear usuario
 app.post('/usuarios', async (req, res) => {
   const { cedula, tipo_documento, nombre, telefono, correo } = req.body;
+
+  // Validación de campos requeridos
   if (!cedula || !nombre || !correo)
     return res.status(400).json({ error: 'Campos requeridos: cedula, nombre, correo' });
 
@@ -37,11 +39,19 @@ app.post('/usuarios', async (req, res) => {
        VALUES (?, ?, ?, ?, ?)`,
       [cedula, tipo_documento || 'CC', nombre, telefono, correo]
     );
+
     res.json({ message: 'Usuario creado correctamente' });
+
   } catch (err) {
-    res.status(400).json({ error: 'Error al crear usuario o ya existe' });
+    console.error('❌ Error al crear usuario:', err.message); // <-- log visible en consola
+
+    res.status(400).json({
+      error: 'Error al crear usuario o ya existe',
+      detalle: err.message // <-- útil para debugging
+    });
   }
 });
+
 
 // ✅ Actualizar usuario
 app.put('/usuarios/:cedula', async (req, res) => {
@@ -109,16 +119,28 @@ app.get('/ordenes', async (req, res) => {
     JOIN usuarios u ON o.cedula = u.cedula
     JOIN puntos_venta p ON o.id_punto_venta = p.id
   `);
-  res.json(ordenes);
+
+  const ordenesConDetalle = ordenes.map(o => ({
+    ...o,
+    detalle_json: o.detalle_json ? JSON.parse(o.detalle_json) : []
+  }));
+
+  res.json(ordenesConDetalle);
 });
+
 
 // ✅ Obtener orden específica
 app.get('/ordenes/:id', async (req, res) => {
   const orden = await db.get('SELECT * FROM ordenes WHERE id = ?', [req.params.id]);
-  if (!orden) return res.status(404).json({ error: 'Orden no encontrada' });
+if (!orden) return res.status(404).json({ error: 'Orden no encontrada' });
 
-  const detalles = await db.all('SELECT * FROM detalle_ordenes WHERE id_orden = ?', [orden.id]);
-  res.json({ ...orden, detalles });
+const detalles = orden.detalle_json ? JSON.parse(orden.detalle_json) : [];
+
+res.json({
+  ...orden,
+  detalles
+});
+
 });
 
 // ✅ Crear orden con detalle y documento equivalente
@@ -128,53 +150,95 @@ app.post('/ordenes', async (req, res) => {
   if (!cedula || !id_punto_venta || !items || items.length === 0)
     return res.status(400).json({ error: 'Campos requeridos: cedula, id_punto_venta, items' });
 
-  const usuario = await db.get('SELECT * FROM usuarios WHERE cedula = ?', [cedula]);
-  if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado' });
+  try {
+    // Buscar usuario
+    const usuario = await db.get('SELECT * FROM usuarios WHERE cedula = ?', [cedula]);
+    if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado' });
 
-  const subtotal = items.reduce((sum, i) => sum + i.cantidad * i.precio_unitario, 0);
-  const impuestos = subtotal * 0.19;
-  const total = subtotal + impuestos;
-  const idOrden = uuidv4();
+    // Calcular totales
+    const subtotal = items.reduce((sum, i) => sum + i.cantidad * i.precio_unitario, 0);
+    const impuestos = subtotal * 0.19;
+    const total = subtotal + impuestos;
+    const idOrden = uuidv4();
 
-  await db.run(
-    `INSERT INTO ordenes (id, numero, cedula, id_punto_venta, subtotal, impuestos, total, metodo_pago, metodo_validacion)
-     VALUES (?, (SELECT IFNULL(MAX(numero), 0) + 1 FROM ordenes), ?, ?, ?, ?, ?, ?, ?)`,
-    [idOrden, cedula, id_punto_venta, subtotal, impuestos, total, metodo_pago, metodo_validacion]
-  );
-
-  for (const item of items) {
+    // Insertar orden
     await db.run(
-      `INSERT INTO detalle_ordenes (id, id_orden, id_producto, cantidad, precio_unitario, subtotal)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO ordenes (
+         id, numero, cedula, id_punto_venta, subtotal, impuestos, total, metodo_pago, metodo_validacion, detalle_json
+       ) VALUES (
+         ?, (SELECT COALESCE(MAX(numero), 0) + 1 FROM ordenes), ?, ?, ?, ?, ?, ?, ?, ?
+       )`,
       [
-        uuidv4(),
         idOrden,
-        item.id_producto,
-        item.cantidad,
-        item.precio_unitario,
-        item.cantidad * item.precio_unitario
+        cedula,
+        id_punto_venta,
+        subtotal,
+        impuestos,
+        total,
+        metodo_pago,
+        metodo_validacion,
+        JSON.stringify(items)
       ]
     );
+
+    // Insertar detalle de la orden
+    for (const item of items) {
+      await db.run(
+        `INSERT INTO detalle_ordenes (id, id_orden, id_producto, cantidad, precio_unitario, subtotal)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          uuidv4(),
+          idOrden,
+          item.id_producto,
+          item.cantidad,
+          item.precio_unitario,
+          item.cantidad * item.precio_unitario
+        ]
+      );
+    }
+
+    // Crear factura electrónica
+    const numeroDoc = await obtenerConsecutivoDocumento(db);
+    const cufe = generarCUFE(numeroDoc, new Date().toISOString(), total, '860012357-6');
+
+    // Documento equivalente (control interno)
+    await db.run(
+      `INSERT INTO documentos_equivalentes (id, id_orden, numero_documento, cufe, estado_envio)
+       VALUES (?, ?, ?, ?, ?)`,
+      [uuidv4(), idOrden, numeroDoc, cufe, 'PENDIENTE']
+    );
+
+    // Factura electrónica
+    await db.run(
+      `INSERT INTO facturas (
+         id, numero, fecha, cedula, id_orden, total, detalle, cufe, estado_envio, detalle_json
+       ) VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        uuidv4(),
+        numeroDoc,
+        cedula,
+        idOrden,
+        total,
+        'Factura electrónica generada automáticamente',
+        cufe,
+        'PENDIENTE',
+        JSON.stringify(items)
+      ]
+    );
+
+    // Auditoría
+    await registrarAuditoria(db, 'ordenes', idOrden, 'INSERT', {}, req.body, 'SISTEMA', cedula);
+
+    res.json({
+      message: 'Orden creada con factura electrónica generada',
+      idOrden,
+      numero_documento: numeroDoc,
+      cufe
+    });
+  } catch (err) {
+    console.error('❌ Error al crear orden:', err);
+    res.status(500).json({ error: 'Error interno al crear orden', detalle: err.message });
   }
-
-  // Crear documento equivalente (simulación factura electrónica)
-  const numeroDoc = await obtenerConsecutivoDocumento(db);
-  const cufe = generarCUFE(numeroDoc, new Date().toISOString(), total, '860012357-6');
-
-  await db.run(
-    `INSERT INTO documentos_equivalentes (id, id_orden, numero_documento, cufe, estado_envio)
-     VALUES (?, ?, ?, ?, ?)`,
-    [uuidv4(), idOrden, numeroDoc, cufe, 'PENDIENTE']
-  );
-
-  await registrarAuditoria(db, 'ordenes', idOrden, 'INSERT', {}, req.body, 'SISTEMA', cedula);
-
-  res.json({
-    message: 'Orden creada y documento equivalente generado',
-    idOrden,
-    numero_documento: numeroDoc,
-    cufe
-  });
 });
 
 // ✅ Cambiar estado de la orden

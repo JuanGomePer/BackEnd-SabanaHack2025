@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 import pg from 'pg';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
+import * as crypto from 'crypto';
 dotenv.config();
 
 const { Pool } = pg;
@@ -121,6 +122,7 @@ export async function initDB() {
       metodo_pago TEXT,
       metodo_validacion TEXT,
       estado TEXT DEFAULT 'COMPLETADA',
+      detalle_json TEXT,
       FOREIGN KEY(cedula) REFERENCES usuarios(cedula),
       FOREIGN KEY(id_punto_venta) REFERENCES puntos_venta(id)
     );
@@ -171,6 +173,7 @@ export async function initDB() {
       cufe TEXT,
       qr_factura TEXT,
       estado_envio TEXT DEFAULT 'PENDIENTE',
+      detalle_json TEXT,
       FOREIGN KEY(cedula) REFERENCES usuarios(cedula),
       FOREIGN KEY(id_orden) REFERENCES ordenes(id)
     );
@@ -220,6 +223,34 @@ export async function initDB() {
   `);
 
   console.log('✅ Base de datos inicializada correctamente');
+  // ==================== ADAPTADOR UNIVERSAL ====================
+
+// Esta función traduce los placeholders ? a $1, $2, ...
+function adaptSQL(query, params, usePostgres) {
+  if (!usePostgres) return { query, params };
+  let index = 0;
+  const converted = query.replace(/\?/g, () => `$${++index}`);
+  return { query: converted, params };
+}
+
+// Reemplazamos los métodos db.run/get/all para adaptar dinámicamente
+const originalRun = db.run;
+db.run = async (query, params = []) => {
+  const { query: q, params: p } = adaptSQL(query, params, usePostgres);
+  return originalRun(q, p);
+};
+
+const originalGet = db.get;
+db.get = async (query, params = []) => {
+  const { query: q, params: p } = adaptSQL(query, params, usePostgres);
+  return originalGet(q, p);
+};
+
+const originalAll = db.all;
+db.all = async (query, params = []) => {
+  const { query: q, params: p } = adaptSQL(query, params, usePostgres);
+  return originalAll(q, p);
+};
   return db;
 }
 
@@ -231,10 +262,9 @@ export function generarCodigoQR(cedula) {
   return `UDINING:${cedula}:${timestamp}:${random}`;
 }
 
-export async function generarCUFE(numeroDocumento, fecha, total, nitEmpresa) {
-  const { createHash } = await import('crypto');
-  const data = `${numeroDocumento}${fecha}${total}${nitEmpresa}`;
-  return createHash('sha256').update(data).digest('hex').toUpperCase();
+export function generarCUFE(numero, fecha, total, nit) {
+  const data = `${numero}|${fecha}|${total}|${nit}|${Math.random()}`;
+  return crypto.createHash('sha256').update(data).digest('hex');
 }
 
 export async function obtenerConsecutivoDocumento(db, prefijo = 'UDINING') {
