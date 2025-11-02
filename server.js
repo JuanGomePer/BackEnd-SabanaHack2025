@@ -163,23 +163,24 @@ app.post('/ordenes', async (req, res) => {
 
     // Insertar orden
     await db.run(
-      `INSERT INTO ordenes (
-         id, numero, cedula, id_punto_venta, subtotal, impuestos, total, metodo_pago, metodo_validacion, detalle_json
-       ) VALUES (
-         ?, (SELECT COALESCE(MAX(numero), 0) + 1 FROM ordenes), ?, ?, ?, ?, ?, ?, ?, ?
-       )`,
-      [
-        idOrden,
-        cedula,
-        id_punto_venta,
-        subtotal,
-        impuestos,
-        total,
-        metodo_pago,
-        metodo_validacion,
-        JSON.stringify(items)
-      ]
-    );
+  `INSERT INTO ordenes (
+     id, numero, cedula, id_punto_venta, subtotal, impuestos, total, metodo_pago, metodo_validacion, estado, detalle_json
+   ) VALUES (
+     ?, (SELECT COALESCE(MAX(numero), 0) + 1 FROM ordenes), ?, ?, ?, ?, ?, ?, ?, ?, ?
+   )`,
+  [
+    idOrden,
+    cedula,
+    id_punto_venta,
+    subtotal,
+    impuestos,
+    total,
+    metodo_pago,
+    metodo_validacion,
+    'PENDIENTE',           // <-- aquí el cambio
+    JSON.stringify(items)
+  ]
+);
 
     // Insertar detalle de la orden
     for (const item of items) {
